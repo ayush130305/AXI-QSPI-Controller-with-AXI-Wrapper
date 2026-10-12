@@ -1,0 +1,10 @@
+../rtl/qspi/qspi_axi_pkg.sv
+../rtl/cdc/pulse_sync.sv
+../rtl/cdc/cdc_bridge.sv
+../rtl/axi/axi4L_slave.sv
+../rtl/qspi/qspi_engine.sv
+../rtl/qspi/qspi_arbiter.sv
+../rtl/xip/qspi_xip_slave.sv
+../rtl/axi/qspi_unified_slave.sv
+../rtl/qspi_axi_top.sv
+../emu/qspi_flash_model.sv
