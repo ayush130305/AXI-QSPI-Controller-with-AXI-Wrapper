@@ -25,25 +25,23 @@ module tb_xip_qspi_axi_top;
   end
 
   // ---------------- AXI-Lite Signals (Register Path) ----------------
-  logic [31:0] AXI_AWADDR;
-  logic        AXI_AWVALID, AXI_AWREADY;
-  logic [31:0] AXI_WDATA;
-  logic [3:0]  AXI_WSTRB;
-  logic        AXI_WVALID, AXI_WREADY;
-  logic [1:0]  AXI_BRESP;
-  logic        AXI_BVALID, AXI_BREADY;
-  logic [31:0] AXI_ARADDR;
-  logic        AXI_ARVALID, AXI_ARREADY;
-  logic [31:0] AXI_RDATA;
-  logic [1:0]  AXI_RRESP;
-  logic        AXI_RVALID, AXI_RREADY;
+  logic [31:0] S_AXI_AWADDR;
+  logic        S_AXI_AWVALID, S_AXI_AWREADY;
+  logic [31:0] S_AXI_WDATA;
+  logic [3:0]  S_AXI_WSTRB;
+  logic        S_AXI_WVALID, S_AXI_WREADY;
+  logic [1:0]  S_AXI_BRESP;
+  logic        S_AXI_BVALID, S_AXI_BREADY;
+  logic [31:0] S_AXI_ARADDR;
+  logic        S_AXI_ARVALID, S_AXI_ARREADY;
+  logic [31:0] S_AXI_RDATA;
+  logic [1:0]  S_AXI_RRESP;
+  logic        S_AXI_RVALID, S_AXI_RREADY;
 
   // ---------------- AXI-Lite Signals (XIP Path) ----------------
-  logic [31:0] XIP_ARADDR;
-  logic        XIP_ARVALID, XIP_ARREADY;
-  logic [31:0] XIP_RDATA;
-  logic [1:0]  XIP_RRESP;
-  logic        XIP_RVALID, XIP_RREADY;
+  // ---------------- Single AXI4-Lite port ----------------
+  // Both register-path and XIP transactions now share these same wires -
+  // routed internally by qspi_unified_slave.sv based on address.
 
   // ---------------- QSPI Pins ----------------
   logic dut_cs_n;
@@ -76,14 +74,11 @@ module tb_xip_qspi_axi_top;
     .ACLK(ACLK), .ARESETn(ARESETn),
     .qclk(qclk), .qclk_rst(qclk_rst),
 
-    .AXI_AWADDR(AXI_AWADDR), .AXI_AWVALID(AXI_AWVALID), .AXI_AWREADY(AXI_AWREADY),
-    .AXI_WDATA(AXI_WDATA), .AXI_WSTRB(AXI_WSTRB), .AXI_WVALID(AXI_WVALID), .AXI_WREADY(AXI_WREADY),
-    .AXI_BRESP(AXI_BRESP), .AXI_BVALID(AXI_BVALID), .AXI_BREADY(AXI_BREADY),
-    .AXI_ARADDR(AXI_ARADDR), .AXI_ARVALID(AXI_ARVALID), .AXI_ARREADY(AXI_ARREADY),
-    .AXI_RDATA(AXI_RDATA), .AXI_RRESP(AXI_RRESP), .AXI_RVALID(AXI_RVALID), .AXI_RREADY(AXI_RREADY),
-
-    .XIP_ARADDR(XIP_ARADDR), .XIP_ARVALID(XIP_ARVALID), .XIP_ARREADY(XIP_ARREADY),
-    .XIP_RDATA(XIP_RDATA), .XIP_RRESP(XIP_RRESP), .XIP_RVALID(XIP_RVALID), .XIP_RREADY(XIP_RREADY),
+    .S_AXI_AWADDR(S_AXI_AWADDR), .S_AXI_AWVALID(S_AXI_AWVALID), .S_AXI_AWREADY(S_AXI_AWREADY),
+    .S_AXI_WDATA(S_AXI_WDATA), .S_AXI_WSTRB(S_AXI_WSTRB), .S_AXI_WVALID(S_AXI_WVALID), .S_AXI_WREADY(S_AXI_WREADY),
+    .S_AXI_BRESP(S_AXI_BRESP), .S_AXI_BVALID(S_AXI_BVALID), .S_AXI_BREADY(S_AXI_BREADY),
+    .S_AXI_ARADDR(S_AXI_ARADDR), .S_AXI_ARVALID(S_AXI_ARVALID), .S_AXI_ARREADY(S_AXI_ARREADY),
+    .S_AXI_RDATA(S_AXI_RDATA), .S_AXI_RRESP(S_AXI_RRESP), .S_AXI_RVALID(S_AXI_RVALID), .S_AXI_RREADY(S_AXI_RREADY),
 
     .cs_n(dut_cs_n),
     .io0_out(dut_io0_out), .io0_oe(dut_io0_oe), .io0_in(dut_io0_in),
@@ -110,58 +105,63 @@ module tb_xip_qspi_axi_top;
   task automatic axi_write(input logic [31:0] addr, input logic [31:0] data);
     logic aw_done = 0, w_done = 0;
     @(posedge ACLK); #2;
-    AXI_AWADDR = addr; AXI_AWVALID = 1'b1;
-    AXI_WDATA  = data; AXI_WSTRB = 4'hF; AXI_WVALID = 1'b1;
+    S_AXI_AWADDR = addr; S_AXI_AWVALID = 1'b1;
+    S_AXI_WDATA  = data; S_AXI_WSTRB = 4'hF; S_AXI_WVALID = 1'b1;
     while (!(aw_done && w_done)) begin
       @(posedge ACLK);
-      if (AXI_AWVALID && AXI_AWREADY) aw_done = 1'b1;
-      if (AXI_WVALID  && AXI_WREADY)  w_done  = 1'b1;
+      if (S_AXI_AWVALID && S_AXI_AWREADY) aw_done = 1'b1;
+      if (S_AXI_WVALID  && S_AXI_WREADY)  w_done  = 1'b1;
     end
     @(posedge ACLK);
-    AXI_AWVALID <= 1'b0; AXI_WVALID <= 1'b0;
+    S_AXI_AWVALID <= 1'b0; S_AXI_WVALID <= 1'b0;
     @(posedge ACLK);
-    AXI_BREADY <= 1'b1;
-    while (!AXI_BVALID) @(posedge ACLK);
+    S_AXI_BREADY <= 1'b1;
+    while (!S_AXI_BVALID) @(posedge ACLK);
     @(posedge ACLK);
-    AXI_BREADY <= 1'b0;
+    S_AXI_BREADY <= 1'b0;
   endtask
 
   task automatic axi_read(input logic [31:0] addr, output logic [31:0] data, output logic [1:0] resp);
     logic ar_done = 0;
     @(posedge ACLK); #2;
-    AXI_ARADDR = addr; AXI_ARVALID = 1'b1;
+    S_AXI_ARADDR = addr; S_AXI_ARVALID = 1'b1;
     while (!ar_done) begin
       @(posedge ACLK);
-      if (AXI_ARVALID && AXI_ARREADY) ar_done = 1'b1;
+      if (S_AXI_ARVALID && S_AXI_ARREADY) ar_done = 1'b1;
     end
     @(posedge ACLK);
-    AXI_ARVALID <= 1'b0;
+    S_AXI_ARVALID <= 1'b0;
     @(posedge ACLK);
-    AXI_RREADY <= 1'b1;
-    while (!AXI_RVALID) @(posedge ACLK);
-    data = AXI_RDATA;
-    resp = AXI_RRESP;
+    S_AXI_RREADY <= 1'b1;
+    while (!S_AXI_RVALID) @(posedge ACLK);
+    data = S_AXI_RDATA;
+    resp = S_AXI_RRESP;
     @(posedge ACLK);
-    AXI_RREADY <= 1'b0;
+    S_AXI_RREADY <= 1'b0;
   endtask
 
   task automatic xip_read(input logic [31:0] addr, output logic [31:0] data, output logic [1:0] resp);
+    // Mechanically identical to axi_read now - there's only one physical
+    // AXI port. "xip_read" is kept as a distinct task name purely for
+    // test-code readability (communicating intent: "this address is
+    // meant to land in the XIP window"), not because it drives different
+    // wires anymore.
     logic ar_done = 0;
     @(posedge ACLK); #2;
-    XIP_ARADDR = addr; XIP_ARVALID = 1'b1;
+    S_AXI_ARADDR = addr; S_AXI_ARVALID = 1'b1;
     while (!ar_done) begin
       @(posedge ACLK);
-      if (XIP_ARVALID && XIP_ARREADY) ar_done = 1'b1;
+      if (S_AXI_ARVALID && S_AXI_ARREADY) ar_done = 1'b1;
     end
     @(posedge ACLK);
-    XIP_ARVALID <= 1'b0;
+    S_AXI_ARVALID <= 1'b0;
     @(posedge ACLK);
-    XIP_RREADY <= 1'b1;
-    while (!XIP_RVALID) @(posedge ACLK);
-    data = XIP_RDATA;
-    resp = XIP_RRESP;
+    S_AXI_RREADY <= 1'b1;
+    while (!S_AXI_RVALID) @(posedge ACLK);
+    data = S_AXI_RDATA;
+    resp = S_AXI_RRESP;
     @(posedge ACLK);
-    XIP_RREADY <= 1'b0;
+    S_AXI_RREADY <= 1'b0;
   endtask
 
   // ---------------- Pass/Fail Bookkeeping ----------------
@@ -203,37 +203,31 @@ module tb_xip_qspi_axi_top;
     xip_read(32'h0200_0000, rdata, rresp);
     report("xip_out_of_range", rresp === 2'b10, "(Expected DECERR 2'b10 for out-of-bounds address)");
 
-    // ---- 4. Arbiter Priority (Register vs XIP collision) ----
+    // ---- 4. Back-to-back register-path and XIP reads through the shared port ----
+    // Originally this test fired a register-path read and an XIP read on
+    // the SAME cycle to exercise the arbiter's tie-break logic. That is
+    // no longer physically possible after merging both paths onto one
+    // AXI4-Lite port: a single AR channel can only carry one ARADDR at a
+    // time, so two independent reads can never truly be concurrent from
+    // the external master's point of view anymore. This is a direct,
+    // structural consequence of the port merge, not an oversight.
+    //
+    // What remains genuinely meaningful to test: that a register-path
+    // read and an XIP read, issued back-to-back on the SAME shared port,
+    // both route correctly to their respective internal destinations
+    // (register bank vs. XIP fetch) based purely on address, with no
+    // state leaking between them.
     begin
       logic [31:0] ax_data, xp_data;
       logic [1:0]  ax_resp, xp_resp;
-      
-      @(posedge ACLK);
-      AXI_ARADDR = REG_STATUS; AXI_ARVALID = 1'b1;
-      XIP_ARADDR = 32'h0100_0020; XIP_ARVALID = 1'b1;
 
-      fork
-        begin
-          while (!(AXI_ARVALID && AXI_ARREADY)) @(posedge ACLK);
-          @(posedge ACLK); AXI_ARVALID <= 1'b0;
-          AXI_RREADY <= 1'b1;
-          while (!AXI_RVALID) @(posedge ACLK);
-          ax_data = AXI_RDATA; ax_resp = AXI_RRESP;
-          @(posedge ACLK); AXI_RREADY <= 1'b0;
-        end
-        begin
-          while (!(XIP_ARVALID && XIP_ARREADY)) @(posedge ACLK);
-          @(posedge ACLK); XIP_ARVALID <= 1'b0;
-          XIP_RREADY <= 1'b1;
-          while (!XIP_RVALID) @(posedge ACLK);
-          xp_data = XIP_RDATA; xp_resp = XIP_RRESP;
-          @(posedge ACLK); XIP_RREADY <= 1'b0;
-        end
-      join
+      axi_read(REG_STATUS, ax_data, ax_resp);
+      xip_read(32'h0100_0020, xp_data, xp_resp);
 
-      report("arbiter_collision_resolution", 
+      report("shared_port_register_then_xip_read",
              (ax_resp === 2'b00) && (xp_resp === 2'b00) && (xp_data === 32'h23222120),
-             "(Both transactions completed successfully after collision)");
+             $sformatf("(register read resp=%b, XIP read resp=%b data=%08h, expected XIP data=23222120)",
+                       ax_resp, xp_resp, xp_data));
     end
 
     // ---- 5. Abort is global - cuts short a transaction even while XIP holds the grant ----
@@ -249,16 +243,16 @@ module tb_xip_qspi_axi_top;
       logic [31:0] abort_ctrl_cmd;
 
       @(posedge ACLK);
-      XIP_ARADDR = 32'h0100_0040; XIP_ARVALID = 1'b1;
+      S_AXI_ARADDR = 32'h0100_0040; S_AXI_ARVALID = 1'b1;
 
       fork
         begin
-          while (!(XIP_ARVALID && XIP_ARREADY)) @(posedge ACLK);
-          @(posedge ACLK); XIP_ARVALID <= 1'b0;
-          XIP_RREADY <= 1'b1;
-          while (!XIP_RVALID) @(posedge ACLK);
-          xip_data = XIP_RDATA; xip_resp = XIP_RRESP;
-          @(posedge ACLK); XIP_RREADY <= 1'b0;
+          while (!(S_AXI_ARVALID && S_AXI_ARREADY)) @(posedge ACLK);
+          @(posedge ACLK); S_AXI_ARVALID <= 1'b0;
+          S_AXI_RREADY <= 1'b1;
+          while (!S_AXI_RVALID) @(posedge ACLK);
+          xip_data = S_AXI_RDATA; xip_resp = S_AXI_RRESP;
+          @(posedge ACLK); S_AXI_RREADY <= 1'b0;
         end
         begin
           // Wait until the XIP transaction is genuinely mid-flight
@@ -317,16 +311,16 @@ module tb_xip_qspi_axi_top;
       logic [1:0]  xip_resp;
 
       @(posedge ACLK);
-      XIP_ARADDR = 32'h0100_0060; XIP_ARVALID = 1'b1;
+      S_AXI_ARADDR = 32'h0100_0060; S_AXI_ARVALID = 1'b1;
 
       fork
         begin
-          while (!(XIP_ARVALID && XIP_ARREADY)) @(posedge ACLK);
-          @(posedge ACLK); XIP_ARVALID <= 1'b0;
-          XIP_RREADY <= 1'b1;
-          while (!XIP_RVALID) @(posedge ACLK);
-          xip_data = XIP_RDATA; xip_resp = XIP_RRESP;
-          @(posedge ACLK); XIP_RREADY <= 1'b0;
+          while (!(S_AXI_ARVALID && S_AXI_ARREADY)) @(posedge ACLK);
+          @(posedge ACLK); S_AXI_ARVALID <= 1'b0;
+          S_AXI_RREADY <= 1'b1;
+          while (!S_AXI_RVALID) @(posedge ACLK);
+          xip_data = S_AXI_RDATA; xip_resp = S_AXI_RRESP;
+          @(posedge ACLK); S_AXI_RREADY <= 1'b0;
         end
         begin
           repeat (15) @(posedge ACLK);

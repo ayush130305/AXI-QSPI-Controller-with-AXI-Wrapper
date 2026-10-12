@@ -5,7 +5,19 @@ import qspi_axi_pkg::*;
     QSPI engine and flags for busy, done, tx_ready, rx_ready, and error conditions.
 */
 
-module axi4L_slave (
+module axi4L_slave #(
+    // Reset value for XIP_CFG. Defaults to 0 (XIP disabled, all fields
+    // zero) - this IP's original, deliberate general-purpose safety
+    // default: XIP stays off until software explicitly configures and
+    // enables it. Override only for specific system integrations that
+    // genuinely need XIP already active before any software/bootloader
+    // step could configure it (e.g. a CPU whose very first instruction
+    // fetch after reset comes directly from XIP) - that is a
+    // system-level integration decision belonging to whatever
+    // instantiates this module, not something this IP should impose on
+    // every user by default.
+    parameter logic [31:0] XIP_CFG_RESET = 32'h0
+)(
     input logic ACLK, // axi clock signal
     input logic ARESETn, /*active low reset signal */
 
@@ -290,7 +302,13 @@ if (!ARESETn) begin
     reg_addr      <= '0;
     reg_num_bytes <= '0;
     reg_tx_data   <= '0;
-    reg_xip_cfg   <= '0; // XIP_ENABLE defaults to 0 - XIP is off until software explicitly configures and enables it
+    reg_xip_cfg   <= XIP_CFG_RESET; // see module parameter declaration -
+        // defaults to 0 (disabled), preserving this IP's original,
+        // deliberate general-purpose safety default. Overridden only by
+        // specific system integrations (e.g. basys3_top.sv) that need
+        // XIP already active before any bootloader step could configure
+        // it - that is a system-level integration decision, not
+        // something this IP should silently impose on every user.
 end else if (do_write) begin
     case (eff_addr)
     REG_CTRL_CMD:  for (int i = 0; i < 4; i++)
