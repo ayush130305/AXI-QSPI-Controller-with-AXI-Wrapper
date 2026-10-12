@@ -97,11 +97,12 @@ module tb_qspi_axi_top;
   assign dut_io3_in = io3_line;
 
   // ---------------- DUT ----------------
-  // TIMEOUT_CYCLES overridden small here purely so the timeout test doesn't
-  // need to wait ~1M cycles - production instantiations should use the
+  // TIMEOUT_CYCLES overridden small here (1000) purely so the timeout test
+  // doesn't need to wait ~1M cycles. It is still long enough for the 256-byte
+  // quad read in numbytes_256_truncation (~560 cycles) - production instantiations should use the
   // default (or their own deliberately-chosen value).
   qspi_axi_top #(
-    .TIMEOUT_CYCLES(200)
+    .TIMEOUT_CYCLES(1000)
   ) u_dut (
     .ACLK        (ACLK),
     .ARESETn     (ARESETn),
@@ -273,6 +274,33 @@ module tb_qspi_axi_top;
     wait_for_done(done_ok);
   endtask
 
+
+  // Counts qclk cycles with chip select low, so a test can check exactly how long a command held CS#.
+  int cs_low_cycles = 0;
+  always @(posedge qclk) if (!dut_cs_n) cs_low_cycles++;
+
+  // Issues a command with NO address phase (CTRL_CMD bit 24 set): WREN, RDID, RDSR, WRSR and similar.
+  task automatic run_cmd_noaddr(
+    input bit          dir,
+    input logic [7:0]  opcode,
+    input logic [31:0] num_bytes,
+    input logic [7:0]  first_tx_byte,
+    output bit         done_ok
+  );
+    logic [31:0] ctrl_cmd_word;
+    axi_write(REG_NUM_BYTES, num_bytes);
+    if (dir) axi_write(REG_TX_DATA, {24'd0, first_tx_byte});
+    // bit 24 = NO_ADDR, bit 22 = dir, bit 21 = start, bits 11:8 = single-line data and address, no dummy cycles
+    ctrl_cmd_word = {7'b0, 1'b1, 1'b0, dir, 1'b1, 8'd0, 1'b0, 2'b00, 2'b00, opcode};
+    axi_write(REG_CTRL_CMD, ctrl_cmd_word);
+    wait_for_done(done_ok);
+  endtask
+
+  localparam logic [7:0] OP_WREN = 8'h06; // write enable, opcode only
+  localparam logic [7:0] OP_RDSR = 8'h05; // read status register, no address
+  localparam logic [7:0] OP_WRSR = 8'h01; // write status register, no address
+  localparam logic [7:0] OP_RDID = 8'h9F; // read JEDEC ID, no address
+
   // Opcodes must match qspi_flash_model.sv's decode table exactly -
   // these are what a real driver would pick for each mode.
   localparam logic [7:0] OP_READ           = 8'h03;
@@ -301,7 +329,7 @@ module tb_qspi_axi_top;
   //   6  read_quad_3byte_lastbyte multi-byte transfer + documents RX_DATA gap
   //   7  read_32bit_addr          32-bit address width
   //   8  read_dummy_zero          ADDR->DATA transition skips DUMMY correctly
-  //   9  numbytes_256_truncation  NUM_BYTES counter-width fix (always reports PASS - see below)
+  //   9  numbytes_255/256         NUM_BYTES counter-width fix (checks the last byte read)
   //   10 back_to_back_txns        clean state reset between transactions
   //   11 start_while_busy_ignored start bit ignored while already busy
   //   12 sticky_done_bit          DONE latches + W1C clear works
@@ -407,18 +435,31 @@ module tb_qspi_axi_top;
     report("read_dummy_zero", done_ok && rx_val[7:0]===8'h1E,
            $sformatf("(got %02h expected 1e)", rx_val[7:0]));
 
-    // ---- 9. NUM_BYTES = 256 truncation check ----
-    // Tests: the counter-widening fix - num_bytes=256 must NOT wrap to 0
-    // and complete an instant, empty transfer the way it did when
-    // data_clocks was computed from num_bytes_lat[7:0] alone.
-    // Expected: done_ok is TRUE and the transaction takes a realistic
-    // number of cycles for a 256-byte transfer - this test always reports
-    // PASS (the "!done_ok || 1" is always true), it exists to make the
-    // behavior visible in the log/waveform for manual inspection rather
-    // than to assert a specific pass/fail condition by itself.
-    run_txn(0, LW_QUAD, LW_SINGLE, 0, 8, OP_QUAD_READ, 32'd40, 32'd256, 8'h00, done_ok);
-    report("numbytes_256_truncation", !done_ok || 1,
-           done_ok ? "(engine completed - check waveform: likely finished instantly, 0-byte transfer, due to num_bytes[7:0] truncation)" : "(never completed / hung - also consistent with the truncation bug)");
+    // ---- 9. NUM_BYTES = 255 and 256 (counter-width check) ----
+    // Tests: num_bytes=256 must NOT wrap to 0 (the old bug: data_clocks was
+    // computed from num_bytes_lat[7:0] alone, so 256 became an empty
+    // transfer). Flash memory is mem[i]=i, so the byte left in RX_DATA
+    // identifies exactly how many bytes were clocked in.
+    // Expected: 255 bytes from address 0 ends on mem[254]==0xFE; 256 bytes
+    // ends on mem[255]==0xFF. Both must finish with ERROR clear, which also
+    // proves the (raised) TIMEOUT_CYCLES does not cut a long transfer short.
+    begin
+      logic [31:0] status_val;
+      bit          ok255, ok256;
+      run_txn(0, LW_QUAD, LW_SINGLE, 0, 8, OP_QUAD_READ, 32'd0, 32'd255, 8'h00, ok255);
+      axi_read(REG_RX_DATA, rx_val);
+      axi_read(REG_STATUS, status_val);
+      ok255 = ok255 && rx_val[7:0]===8'hFE && !status_val[STATUS_BIT_ERROR];
+      report("numbytes_255_boundary", ok255,
+             $sformatf("(last byte %02h expected fe, error=%0d)", rx_val[7:0], status_val[STATUS_BIT_ERROR]));
+
+      run_txn(0, LW_QUAD, LW_SINGLE, 0, 8, OP_QUAD_READ, 32'd0, 32'd256, 8'h00, ok256);
+      axi_read(REG_RX_DATA, rx_val);
+      axi_read(REG_STATUS, status_val);
+      ok256 = ok256 && rx_val[7:0]===8'hFF && !status_val[STATUS_BIT_ERROR];
+      report("numbytes_256_truncation", ok256,
+             $sformatf("(last byte %02h expected ff, error=%0d)", rx_val[7:0], status_val[STATUS_BIT_ERROR]));
+    end
 
     // ---- 10. Back-to-back transactions ----
     // Tests: the engine correctly resets phase/bit_cnt/byte_bit_cnt between
@@ -564,22 +605,22 @@ module tb_qspi_axi_top;
 
     // ---- 17. Timeout safety net - deliberately request enough bytes that
     // the transfer would naturally exceed this DUT instance's overridden
-    // TIMEOUT_CYCLES=200, and confirm the engine self-aborts with ERROR
+    // TIMEOUT_CYCLES=1000, and confirm the engine self-aborts with ERROR
     // set instead of running forever / completing very late.
     // Tests: the TIMEOUT_CYCLES safety net actually fires when a
     // transaction runs unreasonably long, and correctly flags ERROR (not
     // just BUSY dropping, which an abort would also do - ERROR is what
     // distinguishes "timed out" from "cleanly aborted" or "completed").
-    // Expected: BUSY==0 and ERROR==1. The requested 100-byte single-line
-    // read needs roughly CMD(8)+ADDR(24)+DUMMY(8)+DATA(800)=~840 cycles -
-    // vastly more than this instance's 200-cycle override, so the timeout
-    // must fire well before natural completion.
+    // Expected: BUSY==0 and ERROR==1. The requested 150-byte single-line
+    // read needs roughly CMD(8)+ADDR(24)+DUMMY(8)+DATA(1200)=~1240 cycles -
+    // more than this instance's 1000-cycle override, so the timeout must
+    // fire before natural completion.
     begin
       logic [31:0] status_val;
-      run_txn(0, LW_SINGLE, LW_SINGLE, 0, 8, OP_FAST_READ, 32'd0, 32'd100, 8'h00, done_ok);
+      run_txn(0, LW_SINGLE, LW_SINGLE, 0, 8, OP_FAST_READ, 32'd0, 32'd150, 8'h00, done_ok);
       axi_read(REG_STATUS, status_val);
       report("timeout_safety_net", !status_val[STATUS_BIT_BUSY] && status_val[STATUS_BIT_ERROR],
-             $sformatf("(busy=%0d error=%0d - a 100-byte single-line read needs ~832 cycles, well past the 200-cycle test override)",
+             $sformatf("(busy=%0d error=%0d - a 150-byte single-line read needs ~1240 cycles, past the 1000-cycle test override)",
                         status_val[STATUS_BIT_BUSY], status_val[STATUS_BIT_ERROR]));
       // clear it so it doesn't leak into anything after
       axi_write(REG_STATUS, 32'h1 << STATUS_BIT_ERROR);
@@ -595,6 +636,52 @@ module tb_qspi_axi_top;
     axi_read(REG_RX_DATA, rx_val);
     report("mixed_quad_addr_single_data", done_ok && rx_val[7:0]===8'h82,
            $sformatf("(got %02h expected 82)", rx_val[7:0]));
+
+
+    // ---- 19-24. Commands with no address phase (CTRL_CMD bit 24) ----
+    // Tests: WREN / RDID / RDSR / WRSR, which a real flash needs before it can be used, and which
+    // the engine could not issue before NO_ADDR existed. Also checks that an opcode-only command
+    // holds CS# for exactly 8 clocks, and that NUM_BYTES = 0 no longer adds a stray data clock.
+    begin
+      bit okA, okB, okC;
+      logic [31:0] st;
+
+      // RDID: 1 byte then 3 bytes. RX_DATA keeps the last byte, so C2 then 16 proves the sequence.
+      run_cmd_noaddr(1'b0, OP_RDID, 32'd1, 8'h00, okA);
+      axi_read(REG_RX_DATA, rx_val);
+      okA = okA && rx_val[7:0]===8'hC2;
+      run_cmd_noaddr(1'b0, OP_RDID, 32'd3, 8'h00, okB);
+      axi_read(REG_RX_DATA, rx_val);
+      okB = okB && rx_val[7:0]===8'h16;
+      report("noaddr_rdid", okA && okB, $sformatf("(1 byte ok=%0d, 3rd byte %02h expected 16)", okA, rx_val[7:0]));
+
+      // WREN: opcode only. CS# must be low for exactly the 8 opcode clocks.
+      cs_low_cycles = 0;
+      run_cmd_noaddr(1'b0, OP_WREN, 32'd0, 8'h00, okA);
+      report("noaddr_wren_8_clocks", okA && cs_low_cycles==8, $sformatf("(cs low for %0d qclk cycles, expected 8)", cs_low_cycles));
+
+      // RDSR after WREN: write-enable latch (bit 1) must be set.
+      run_cmd_noaddr(1'b0, OP_RDSR, 32'd1, 8'h00, okA);
+      axi_read(REG_RX_DATA, rx_val);
+      report("noaddr_wren_sets_wel", okA && rx_val[7:0]===8'h02, $sformatf("(status %02h expected 02)", rx_val[7:0]));
+
+      // WRSR with QE bit (0x40) after the WREN above: QE must read back set, WEL cleared.
+      run_cmd_noaddr(1'b1, OP_WRSR, 32'd1, 8'h40, okA);
+      run_cmd_noaddr(1'b0, OP_RDSR, 32'd1, 8'h00, okB);
+      axi_read(REG_RX_DATA, rx_val);
+      report("noaddr_wrsr_sets_qe", okA && okB && rx_val[7:0]===8'h40, $sformatf("(status %02h expected 40)", rx_val[7:0]));
+
+      // WRSR without a preceding WREN must be ignored by the flash.
+      run_cmd_noaddr(1'b1, OP_WRSR, 32'd1, 8'h00, okA);
+      run_cmd_noaddr(1'b0, OP_RDSR, 32'd1, 8'h00, okB);
+      axi_read(REG_RX_DATA, rx_val);
+      report("noaddr_wrsr_needs_wren", okA && okB && rx_val[7:0]===8'h40, $sformatf("(status %02h expected 40)", rx_val[7:0]));
+
+      // NUM_BYTES = 0 with an address: ends right after the address, no extra data clock (8 opcode + 24 address).
+      cs_low_cycles = 0;
+      run_txn(0, LW_SINGLE, LW_SINGLE, 0, 0, OP_READ, 32'd5, 32'd0, 8'h00, okC);
+      report("numbytes_zero_ends_after_address", okC && cs_low_cycles==32, $sformatf("(cs low for %0d qclk cycles, expected 32)", cs_low_cycles));
+    end
 
     $display("=====================================");
     $display("SUMMARY: %0d pass, %0d fail (qclk_period=%0.1fns)", pass_count, fail_count, qclk_period);

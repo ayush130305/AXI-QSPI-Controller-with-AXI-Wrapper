@@ -80,15 +80,17 @@ module qspi_engine #(
   qspi_ctrl_t  ctrl;         // latched copy of qspi_ctrl_cmd, stable for the whole transaction
   logic [31:0] addr_lat;     // latched copy of qspi_addr
   logic [31:0] num_bytes_lat;// latched copy of qspi_num_bytes
+  logic        no_addr_lat;  // latched CTRL_CMD bit 24: 1 = skip the ADDR phase for this transaction
 
   
   always_ff @(posedge sclk or posedge sclk_rst) begin
     if (sclk_rst) begin
-      ctrl <= '0; addr_lat <= '0; num_bytes_lat <= '0;
+      ctrl <= '0; addr_lat <= '0; num_bytes_lat <= '0; no_addr_lat <= 1'b0;
     end else if (!busy_r && qspi_start) begin
       ctrl          <= qspi_ctrl_t'(qspi_ctrl_cmd[22:0]);
       addr_lat      <= qspi_addr;
       num_bytes_lat <= qspi_num_bytes;
+      no_addr_lat   <= qspi_ctrl_cmd[24]; // NO_ADDR sits above ABORT (bit 23), so it is latched on its own, not through the struct
     end
   end
 
@@ -123,6 +125,18 @@ module qspi_engine #(
       default: phase_limit = 16'd0;
     endcase
   end
+
+  // Which phase follows the current one: used to decide whether the transaction
+  // ends early when there are no data bytes (opcode-only commands such as WREN).
+  logic data_is_next;       // 1 when the phase that would follow this one is DATA
+  logic txn_last_cycle;     // 1 on the final cycle of the transaction (drives done and the busy drop)
+  assign data_is_next = (phase == DUMMY) ||
+                        (phase == ADDR && ctrl.dummy_cycles == 0) ||
+                        (phase == CMD  && no_addr_lat && ctrl.dummy_cycles == 0);
+  // A transaction ends on the last DATA cycle, or - when NUM_BYTES is 0 - on the last cycle
+  // of whichever phase would have led into DATA, so CS# rises right after the opcode.
+  assign txn_last_cycle = busy_r && (bit_cnt == phase_limit) &&
+                          (phase == DATA || (data_is_next && num_bytes_lat[11:0] == 12'd0));
 
   // Timeout safety net - counts sclk cycles while busy; if a transaction
   // never completes (stuck flash, misconfiguration, etc.) this forces an
@@ -168,7 +182,7 @@ module qspi_engine #(
       end
     end else if (bit_cnt == phase_limit) begin
       // This phase just finished (this cycle was its last).
-      if (phase == DATA) begin
+      if (txn_last_cycle) begin
         // DATA is the last phase of every transaction - finishing it
         // means the whole transfer is done, not just moving to another
         // phase. qspi_done (below) fires combinationally off this exact
@@ -178,7 +192,7 @@ module qspi_engine #(
         // Any other phase finishing just advances to the next one.
         bit_cnt <= '0;
         case (phase)
-          CMD:   phase <= ADDR;
+          CMD:   phase <= !no_addr_lat ? ADDR : ((ctrl.dummy_cycles > 0) ? DUMMY : DATA); // NO_ADDR skips the ADDR phase
           ADDR:  phase <= (ctrl.dummy_cycles > 0) ? DUMMY : DATA; // skip DUMMY entirely if 0 cycles configured
           DUMMY: phase <= DATA;
           default: phase <= CMD;
@@ -197,7 +211,7 @@ module qspi_engine #(
   // across to the AXI clock domain, and axi4L_slave.sv is what actually
   // latches it into something software can reliably poll (see STATUS.DONE
   // in that file's comments).
-  assign qspi_done = busy_r && phase == DATA && bit_cnt == phase_limit;
+  assign qspi_done = txn_last_cycle;
   assign cs_n      = !busy_r; // chip select is simply "are we in a transaction" - asserted
                               // (driven low) for the CMD/ADDR/DUMMY/DATA phases as a block,
                               // deasserted the instant busy_r drops for any reason (normal
@@ -275,15 +289,16 @@ module qspi_engine #(
   // is reassembled from the io*_in lines every cycle of DATA, and is
   // presented to qspi_rx_data on the cycle after each byte_boundary (see
   // the delayed rx_valid below).
-  logic entering_data_from_addr, entering_data_from_dummy;
+  logic entering_data_from_addr, entering_data_from_dummy, entering_data_from_cmd;
   assign entering_data_from_addr  = busy_r && phase == ADDR  && bit_cnt == phase_limit && ctrl.dummy_cycles == 0;
   assign entering_data_from_dummy = busy_r && phase == DUMMY && bit_cnt == phase_limit;
+  assign entering_data_from_cmd   = busy_r && phase == CMD   && bit_cnt == phase_limit && no_addr_lat && ctrl.dummy_cycles == 0; // NO_ADDR command going straight from opcode to data
 
   always_ff @(posedge sclk or posedge sclk_rst) begin
     if (sclk_rst) begin
       tx_shift_byte <= '0; in_byte <= '0;
     end else if (ctrl.dir && (entering_data_from_addr || entering_data_from_dummy ||
-                               byte_boundary)) begin
+                               entering_data_from_cmd || byte_boundary)) begin
       tx_shift_byte <= qspi_tx_data; // ctrl.dir gate means this whole branch only exists for writes -
                                      // on a read, this condition is always false regardless of phase
     end else if (busy_r && phase == DATA) begin

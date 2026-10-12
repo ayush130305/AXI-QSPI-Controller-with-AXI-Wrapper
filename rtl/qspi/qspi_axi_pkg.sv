@@ -36,6 +36,9 @@ package qspi_axi_pkg;
   //   bit23 ABORT (new) - write 1 to immediately cancel any in-progress
   //   transaction, regardless of what phase it's in. Not a stored control
   //   bit - it's a strobe, same as start.
+  // bit24 NO_ADDR (new) - 1 = skip the ADDR phase entirely (opcode-only or opcode+data
+  // commands such as WREN, RDID, RDSR, WRSR, chip erase). 0 (reset) keeps the old behaviour.
+  localparam int CTRL_BIT_NO_ADDR = 24; // CTRL_CMD bit that removes the address phase from a transaction
   localparam int CTRL_BIT_ABORT = 23; //used to stop any in process transaction, regardless of what phase it's in. Not a stored control bit - it's a strobe, same as start.
 
   localparam logic [1:0] LW_SINGLE = 2'd0; // single line (1-bit) data transfer

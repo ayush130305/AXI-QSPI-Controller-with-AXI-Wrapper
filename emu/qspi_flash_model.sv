@@ -102,6 +102,7 @@ module qspi_flash_model #(
     // gated quad-mode behavior on QE to begin with), just avoid letting
     // them corrupt its state for whatever legitimate command follows.
 
+  localparam logic [7:0] OP_RDID = 8'h9F; // Read JEDEC ID - opcode then 3 data bytes, no address (returns C2 20 16)
   localparam logic [7:0] OP_RDSR = 8'h05; // Read Status Register -
     // routed to FM_IGNORE for the same reason as WREN/WRSR above. This
     // model doesn't track any real status-register state, so it can't
@@ -147,6 +148,20 @@ module qspi_flash_model #(
                               // qspi_engine's byte_bit_cnt)
   logic [3:0]  clocks_per_byte;
   logic [7:0]  in_byte_acc;    // accumulator for a byte being captured on a write
+  logic [7:0]  sr;             // status register: bit1 = WEL (write enable latch), bit6 = QE (quad enable)
+  logic [1:0]  reg_mode;       // 0 = normal memory access, 1 = RDSR, 2 = RDID, 3 = WRSR (no address phase)
+  logic [1:0]  id_idx;         // which JEDEC ID byte is being shifted out during RDID
+  initial begin sr = 8'h00; reg_mode = 2'd0; id_idx = 2'd0; end // status register starts clear, QE unset
+
+  // JEDEC ID bytes of the modelled part (Macronix MX25L3233F: manufacturer C2, type 20, capacity 16)
+  function automatic logic [7:0] id_byte(input logic [1:0] idx);
+    case (idx)
+      2'd0: id_byte = 8'hC2; // manufacturer
+      2'd1: id_byte = 8'h20; // memory type
+      2'd2: id_byte = 8'h16; // capacity
+      default: id_byte = 8'h00;
+    endcase
+  endfunction
 
   // ---- opcode decode: real flash chips do exactly this off the same
   // 8 CMD-phase bits everyone always sends first ----
@@ -171,6 +186,9 @@ module qspi_flash_model #(
       OP_TEST_DUAL_ADDR: begin dec_dir=1'b0; dec_data_lines=LW_D; dec_addr_lines=LW_D; dec_dummy_cycles=8'd8; dec_addr_bytes=8'd3; end
       OP_TEST_QUAD_ADDR: begin dec_dir=1'b0; dec_data_lines=LW_Q; dec_addr_lines=LW_Q; dec_dummy_cycles=8'd8; dec_addr_bytes=8'd3; end
       OP_TEST_QUAD_ADDR_SINGLE_DATA: begin dec_dir=1'b0; dec_data_lines=LW_S; dec_addr_lines=LW_Q; dec_dummy_cycles=8'd8; dec_addr_bytes=8'd3; end
+      OP_RDSR:          begin dec_dir=1'b0; dec_data_lines=LW_S; dec_addr_lines=LW_S; dec_dummy_cycles=8'd0; dec_addr_bytes=8'd0; end
+      OP_RDID:          begin dec_dir=1'b0; dec_data_lines=LW_S; dec_addr_lines=LW_S; dec_dummy_cycles=8'd0; dec_addr_bytes=8'd0; end
+      OP_WRSR:          begin dec_dir=1'b1; dec_data_lines=LW_S; dec_addr_lines=LW_S; dec_dummy_cycles=8'd0; dec_addr_bytes=8'd0; end
       default:          begin dec_dir=1'b0; dec_data_lines=LW_S; dec_addr_lines=LW_S; dec_dummy_cycles=8'd8; dec_addr_bytes=8'd3; end
     endcase
   end
@@ -187,7 +205,7 @@ module qspi_flash_model #(
     if (cs_n) begin
       // Deselected - forget everything and be ready for a fresh CMD phase
       // the moment cs_n goes low again, exactly like a real flash chip.
-      phase <= FM_CMD; bitcnt <= '0; nibblecnt <= '0;
+      phase <= FM_CMD; bitcnt <= '0; nibblecnt <= '0; reg_mode <= 2'd0;
     end else begin
       case (phase)
         FM_CMD: begin
@@ -206,10 +224,17 @@ module qspi_flash_model #(
             // complete 8-bit opcode is {opcode[6:0], io0_in}, same
             // "not-yet-updated" pattern already used elsewhere in this
             // model's own address-priming logic.
-            if ({opcode[6:0], io0_in} == OP_WREN || {opcode[6:0], io0_in} == OP_WRSR || {opcode[6:0], io0_in} == OP_RDSR) begin
+            if ({opcode[6:0], io0_in} == OP_WREN) begin
+              sr    <= sr | 8'h02; // WREN sets the write-enable latch
               phase <= FM_IGNORE;
+            end else if ({opcode[6:0], io0_in} == OP_RDSR) begin
+              reg_mode <= 2'd1; out_byte <= sr; phase <= FM_DATA; nibblecnt <= '0; // status register straight out, no address
+            end else if ({opcode[6:0], io0_in} == OP_RDID) begin
+              reg_mode <= 2'd2; id_idx <= 2'd0; out_byte <= id_byte(2'd0); phase <= FM_DATA; nibblecnt <= '0; // JEDEC ID, first byte
+            end else if ({opcode[6:0], io0_in} == OP_WRSR) begin
+              reg_mode <= 2'd3; phase <= FM_DATA; nibblecnt <= '0; // status register write, data follows directly
             end else begin
-              phase <= FM_ADDR;
+              reg_mode <= 2'd0; phase <= FM_ADDR;
             end
             bitcnt <= '0;
           end
@@ -292,8 +317,14 @@ module qspi_flash_model #(
           if (!dec_dir) begin
             // READ: shift out_byte left by lpc bits/cycle, refill at byte boundary
             if (nibblecnt == clocks_per_byte - 1) begin
-              out_byte       <= mem[next_addr_byte];
-              next_addr_byte <= next_addr_byte + 8'd1;
+              if (reg_mode == 2'd1) out_byte <= sr; // RDSR repeats the status register while CS# stays low
+              else if (reg_mode == 2'd2) begin // RDID walks through the ID bytes
+                id_idx   <= id_idx + 2'd1;
+                out_byte <= id_byte(id_idx + 2'd1);
+              end else begin
+                out_byte       <= mem[next_addr_byte];
+                next_addr_byte <= next_addr_byte + 8'd1;
+              end
               nibblecnt      <= '0;
             end else begin
               out_byte  <= out_byte << lpc(dec_data_lines);
@@ -318,6 +349,7 @@ module qspi_flash_model #(
               // being updated would only see the pre-this-cycle value,
               // missing the final bit/nibble.
               written_valid <= 1'b1;
+              if (reg_mode == 2'd3 && sr[1]) sr <= {in_byte_acc[6:0], io0_in} & 8'hFC; // WRSR takes effect only after WREN, and clears WEL
               case (dec_data_lines)
                 LW_S: written_byte <= {in_byte_acc[6:0], io0_in};
                 LW_D: written_byte <= {in_byte_acc[5:0], io1_in, io0_in};
